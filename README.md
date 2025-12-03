@@ -1,175 +1,196 @@
-# Kubernetes Scripts
+# Kubernetes Troubleshooting Scripts (pwsh)
 
-A grab-bag repo for small Kubernetes utilities and helper scripts. The goal is fast, copy-paste-friendly commands for day-to-day cluster triage, backed by small PowerShell wrappers when it makes sense.
+A small collection of Kubernetes helper scripts focused on day-to-day troubleshooting and fast visibility into what is happening in a cluster.
 
-## Current scripts
+This repo is designed to work anywhere `pwsh` and `kubectl` work, including Windows, Linux, and macOS.
 
-* `Get-KubeTopPodLimitUsage.ps1`
+## Contents
 
-  * Joins `kubectl top pod --containers` usage with configured resource limits from workloads, then calculates how close each container is to its limits.
+### `Get-KubeTopPodLimitUsage.ps1`
+Defines the function `Get-KubeTopPodLimitUsage` (alias: `ktoph`).
 
-## Repo layout
+It combines:
+- `kubectl top pod --containers` (current CPU and memory usage)
+- Workload resource **limits** (Deployments, StatefulSets, DaemonSets)
+- Pod ownership (so you can see which workload a pod belongs to)
 
-* Scripts live in the repo root (for now).
-* Each script is designed to be dot-sourced and used as a command.
-* Common pattern: a function plus a short alias.
+It also exposes pod lifecycle signals from `kubectl get pods -o json`:
+- **Restarts** (per container)
+- **PodAge**
+- **ContainerAge**
+
+## Key features
+
+- **Per container view**: Pod + container, not just pod totals.
+- **Owner mapping**: Shows which Deployment (or other controller) a pod belongs to.
+- **Limits awareness**: Adds CpuLimitM / MemLimitMi and calculates CpuPct / MemPct when limits exist.
+- **Age and restarts**:
+  - `Restarts` is taken from `.status.containerStatuses[].restartCount`
+  - `PodAge` from `.status.startTime`
+  - `ContainerAge` from container started timestamps (best effort)
+  - Any container with **Restarts > 0 is highlighted red**.
+- **Color output** (default):
+  - Green: normal
+  - Yellow: warning thresholds met
+  - Red: critical thresholds met, or Restarts > 0
+  - Magenta: totals row (only if you opt in)
+- **Filtering and sorting**:
+  - `-Container @("service-a","worker*")`
+  - `-Where { ... }` against any property
+  - `-SortBy MemPct -Descending`
+- **Session caching**:
+  - Workload limits are cached per namespace for the current PowerShell session (`-LimitsCacheMinutes`).
+  - Pods are always read fresh each run so churn is handled correctly.
+- **Output modes**:
+  - Default: colored console output
+  - `-NoColor`: plain table output
+  - `-PassThru`: emit objects for piping/exporting
+- Optional absolute memory thresholds:
+  - `-MemMiWarn` / `-MemMiCrit` let you color based on absolute Mi usage in addition to percent-based thresholds.
 
 ## Requirements
 
-* PowerShell 7+ (`pwsh`) on Windows, Linux, or macOS
-* `kubectl` installed and available on `PATH`
-* Kubernetes Metrics API available (metrics-server) for scripts that rely on `kubectl top`
-* Appropriate RBAC permissions for the namespaces you query
+- PowerShell 7+ (`pwsh`)
+- `kubectl` on PATH
+- A working Metrics API in the cluster (metrics-server or equivalent) so `kubectl top` works
+- RBAC permissions to read:
+  - pods in the namespace
+  - deployments/statefulsets/daemonsets in the namespace
 
-## Quick start
+## Install / import into your profile
 
-Dot-source a script to make its functions available in your current session.
-
-If you are running from inside the repo folder:
+Place the script next to your `$PROFILE` file, then dot-source it from your profile:
 
 ```powershell
-. (Join-Path $PSScriptRoot "Get-KubeTopPodLimitUsage.ps1")
+. (Join-Path -Path (Split-Path -Parent $($PROFILE)) -ChildPath "Get-KubeTopPodLimitUsage.ps1")
+````
+
+Reload your profile:
+
+```powershell
+. $($PROFILE)
 ```
 
-Verify it loaded:
+Confirm the alias exists:
 
 ```powershell
 Get-Command ktoph
 ```
 
-## Load scripts automatically via $PROFILE
+## Notes on units
 
-If you keep scripts in the same folder as your PowerShell profile file, dot-source them like this:
+* `CpuM` is millicores: `150m = 0.15 cores`
+* `MemMi` is Mi: `1024Mi = 1Gi`
+* If CPU or memory **limits are not set**, the related Limit and Pct columns will be blank.
+* `-Where` controls what rows are returned.
+* Threshold parameters like `-MemPctCrit` control coloring, not filtering.
 
-```powershell
-. (Join-Path -Path (Split-Path -Parent $PROFILE) -ChildPath "Get-KubeTopPodLimitUsage.ps1")
-```
+## Basic examples
 
-Reload your profile:
-
-```powershell
-. $PROFILE
-```
-
-## Script: Get-KubeTopPodLimitUsage.ps1
-
-### What it does
-
-It combines three sources of information:
-
-1. **Usage** from `kubectl top pod --containers`
-2. **Limits** from workload specs in the namespace:
-
-   * Deployments
-   * StatefulSets
-   * DaemonSets
-3. **Ownership** from pod metadata (ownerReferences), so results can show which workload a pod belongs to
-
-It outputs a table per pod container containing:
-
-* `CpuM`, `MemMi` from `kubectl top`
-* `CpuLimitM`, `MemLimitMi` from workload specs
-* `CpuPct`, `MemPct` computed as usage divided by limit
-* `OwnerKind` and `Owner` (best-effort) to indicate which workload a pod belongs to
-
-Notes:
-
-* If a container has **no CPU or memory limit**, the related limit and percent columns are blank.
-* For Deployment-managed pods, the owner is derived from pod ownerReferences (ReplicaSet) and the typical ReplicaSet naming pattern.
-
-### Output columns
-
-| Column     | Meaning                                                            |
-| ---------- | ------------------------------------------------------------------ |
-| Namespace  | Namespace queried                                                  |
-| OwnerKind  | Workload type (Deployment, StatefulSet, DaemonSet) when resolvable |
-| Owner      | Workload name when resolvable                                      |
-| Pod        | Pod name                                                           |
-| Container  | Container name                                                     |
-| CpuM       | CPU usage in millicores                                            |
-| CpuLimitM  | CPU limit in millicores (blank if none set)                        |
-| CpuPct     | CPU usage / CPU limit * 100 (blank if no limit)                    |
-| MemMi      | Memory usage in Mi                                                 |
-| MemLimitMi | Memory limit in Mi (blank if none set)                             |
-| MemPct     | Memory usage / memory limit * 100 (blank if no limit)              |
-
-### Caching behavior
-
-* **Pods** are read fresh every run (pods change frequently).
-* **Workload limits** are cached in memory for the PowerShell session, by namespace.
-
-  * Controlled by `-LimitsCacheMinutes` (default: 60).
-
-### Usage
-
-After dot-sourcing, use the alias `ktoph`.
-
-Basic scan for memory pressure:
+### 1) Simple scan
 
 ```powershell
 ktoph -Namespace "default" -SortBy MemPct -Descending
 ```
 
-Filter by container name (supports wildcards):
+### 2) Filter on any output column
 
 ```powershell
-ktoph -Namespace "default" -Container @("api","worker*") -SortBy MemPct -Descending
+ktoph -Namespace "default" `
+  -Where { ($_.MemPct -ge 80) -or ($_.CpuPct -ge 90) -or ($_.Restarts -gt 0) } `
+  -SortBy MemPct -Descending
 ```
 
-Filter on any output column:
+### 3) Filter by containers (supports wildcards)
 
 ```powershell
-ktoph -Namespace "default" -Where { ($_.MemPct -ge 80) -or ($_.CpuPct -ge 90) } -SortBy MemPct -Descending
+ktoph -Namespace "default" -Container @("service-a","worker*") -SortBy MemPct -Descending
 ```
 
-Example (structure):
+### 4) Disable color output
 
 ```powershell
-ktoph -Namespace "my-namespace" -Where { ($_.CpuM -ge 150) -or ($_.MemPct -ge 30) } -IncludeTotals -SortBy MemPct -Descending
+ktoph -Namespace "default" -NoColor -SortBy MemPct -Descending
 ```
 
-Include totals:
-
-* Adds a final `TOTAL` row summing CPU and memory usage.
-* Also computes overall % for CPU and memory where limits exist.
+### 5) Emit objects for piping/exporting
 
 ```powershell
-ktoph -Namespace "default" -IncludeTotals -SortBy MemPct -Descending
+ktoph -Namespace "default" -PassThru |
+  Export-Csv -NoTypeInformation -Path "./kube-top.csv"
 ```
 
-Debug mode:
+### 6) Show anything that restarted (instant red rows)
 
-* `-DebugKubectl` prints raw kubectl output if parsing fails.
+```powershell
+ktoph -Namespace "default" -Where { $_.Restarts -gt 0 } -SortBy Restarts -Descending
+```
+
+## Threshold tuning examples
+
+### Function style: CPU critical at 900m, Memory critical at 50%
+
+```powershell
+ktoph -Namespace "default" `
+  -Where { ($_.CpuM -ge 900) -or ($_.MemPct -ge 40) } `
+  -SortBy MemPct -Descending `
+  -CpuMWarn 500 -CpuMCrit 900 `
+  -MemPctWarn 40 -MemPctCrit 50
+```
+
+### Absolute Mi coloring (useful when you care about raw memory usage)
+
+```powershell
+ktoph -Namespace "default" `
+  -Where { ($_.MemMi -ge 5000) -or ($_.Restarts -gt 0) } `
+  -SortBy MemMi -Descending `
+  -MemMiWarn 5000 -MemMiCrit 5000
+```
+
+## Combined “two views” example (run back-to-back)
+
+```powershell
+clear
+
+Write-Host "=== Service A + Service B (CpuM >= 1000 OR MemMi >= 5000 OR Restarts > 0) ===" -ForegroundColor Cyan
+ktoph -Namespace "my-namespace" `
+  -Container @("service-a","service-b") `
+  -Where { ($_.CpuM -ge 1000) -or ($_.MemMi -ge 5000) -or ($_.Restarts -gt 0) } `
+  -SortBy MemMi -Descending `
+  -CpuMWarn 1000 -CpuMCrit 1000 `
+  -MemMiWarn 5000 -MemMiCrit 5000
+
+Write-Host "`n=== Worker (CpuM >= 2000 OR MemPct >= 50 OR Restarts > 0) ===" -ForegroundColor Cyan
+ktoph -Namespace "my-namespace" `
+  -Container @("worker") `
+  -Where { ($_.CpuM -ge 2000) -or ($_.MemPct -ge 50) -or ($_.Restarts -gt 0) } `
+  -SortBy MemPct -Descending `
+  -CpuMWarn 2000 -CpuMCrit 2000 `
+  -MemPctWarn 50 -MemPctCrit 50
+```
+
+## Troubleshooting
+
+### `kubectl top` returns nothing
+
+* Metrics API is not available or not healthy. Validate with:
+
+  * `kubectl top nodes`
+  * `kubectl get apiservices | Select-String metrics`
+
+### Script returns “No rows matched the current filters.”
+
+* Your `-Where { ... }` filter excluded everything. Remove `-Where` to confirm baseline output.
+
+### Debugging parsing or kubectl output
+
+Use `-DebugKubectl` to print raw lines/output when parsing fails:
 
 ```powershell
 ktoph -Namespace "default" -DebugKubectl
 ```
 
-### Notes on interpretation
+## Tips
 
-* **Memory** close to limit is the risky one. Sustained high `MemPct` is usually how you end up with OOMKills when the process spikes.
-* **CPU** behaves differently. CPU limits can cause throttling rather than killing the process. High `CpuPct` may be fine or may be a performance issue depending on latency and throttling.
-
-### Troubleshooting
-
-Validate metrics are available:
-
-```powershell
-kubectl top pod -n "default"
-kubectl top node
-```
-
-If `kubectl top` fails, common causes:
-
-* Metrics server is not installed or not healthy
-* RBAC does not allow reading the metrics API
-* You are pointed at the wrong cluster or context
-
-Useful checks:
-
-```powershell
-kubectl config current-context
-kubectl get apiservices | Select-String -Pattern "metrics" -SimpleMatch
-kubectl auth can-i get pods -n "default"
-kubectl auth can-i get pods.metrics.k8s.io -n "default"
-```
+* Totals are opt-in only. If you do not pass `-IncludeTotals`, no totals row is calculated or printed.
+* For repeatable triage, prefer filters based on `MemPct` when limits exist, and `MemMi` when you care about absolute memory.
